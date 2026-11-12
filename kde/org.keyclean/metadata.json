@@ -1,0 +1,18 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Id": "org.keyclean",
+        "Name": "Keyboard Cleaning",
+        "Description": "Temporarily ignores physical keyboard input so you can wipe the keyboard with the machine on. Click again to restore it.",
+        "Icon": "input-keyboard-symbolic",
+        "Category": "Utilities",
+        "License": "Apache-2.0",
+        "Version": "1.0",
+        "Authors": [
+            {
+                "Name": "keyclean"
+            }
+        ]
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

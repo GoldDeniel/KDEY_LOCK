@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""StatusNotifierItem front-end for keyclean.
+
+Lets KDE (or a GNOME AppIndicator extension) show the keyboard-cleaning
+toggle in the system tray. The actual grab still lives in keyclean.
+"""
+import os
+import shutil
+import socket
+import subprocess
+
+import dbus
+import dbus.service
+import dbus.mainloop.glib
+from gi.repository import GLib
+
+SNI = "org.kde.StatusNotifierItem"
+WATCHER = "org.kde.StatusNotifierWatcher"
+WATCHER_PATH = "/StatusNotifierWatcher"
+OBJ_PATH = "/StatusNotifierItem"
+NO_MENU = "/NO_DBUSMENU"
+
+
+def sock_path():
+    d = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return "%s/keyclean.sock-%d" % (d, os.getuid())
+
+
+def ask(command):
+    """Talk to the keyclean daemon directly. None if it is not running."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect(sock_path())
+        s.sendall((command + "\n").encode())
+        data = b""
+        while True:
+            chunk = s.recv(256)
+            if not chunk:
+                break
+            data += chunk
+        return data.decode(errors="replace").strip()
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def cli(command):
+    exe = shutil.which("keyclean") or "/usr/local/bin/keyclean"
+    try:
+        return subprocess.run([exe, command], capture_output=True,
+                              text=True, timeout=5)
+    except OSError:
+        return None
+
+
+class Tray(dbus.service.Object):
+    def __init__(self, bus):
+        super().__init__(bus, OBJ_PATH)
+        self.bus = bus
+        self.name = dbus.service.BusName(
+            "org.kde.StatusNotifierItem-%d-1" % os.getpid(), bus)
+        self.registered = False
+        self.active = self._initial_state()
+
+        bus.watch_name_owner(WATCHER, self._watcher_changed)
+        GLib.timeout_add_seconds(2, self._poll)
+        GLib.timeout_add_seconds(5, self._retry_register)
+
+    def _initial_state(self):
+        state = ask("status")
+        if state is None:
+            r = cli("status")  # auto-start the daemon
+            if r is not None and r.returncode == 0:
+                state = r.stdout.strip()
+        return state == "on"
+
+    def _watcher_changed(self, owner):
+        self.registered = False
+        if owner:
+            self._register()
+
+    def _register(self):
+        if self.registered:
+            return
+        try:
+            watcher = dbus.Interface(
+                self.bus.get_object(WATCHER, WATCHER_PATH), WATCHER)
+            watcher.RegisterStatusNotifierItem(self.name.get_name())
+            self.registered = True
+        except dbus.DBusException:
+            self.registered = False
+
+    def _retry_register(self):
+        if not self.registered:
+            self._register()
+        return True
+
+    def _poll(self):
+        state = ask("status")
+        if state is None:
+            r = cli("status")
+            if r is not None and r.returncode == 0:
+                state = r.stdout.strip()
+        if state:
+            self._set_active(state == "on")
+        return True
+
+    @property
+    def _icon(self):
+        return ("changes-prevent-symbolic" if self.active
+                else "input-keyboard-symbolic")
+
+    @property
+    def _tooltip(self):
+        text = ("Keyboard ignored - click to restore" if self.active
+                else "Keyboard active - click to ignore keys")
+        return dbus.Struct((
+            dbus.String(self._icon),
+            dbus.Array([], signature="(iiay)"),
+            dbus.String("Keyboard Cleaning"),
+            dbus.String(text),
+        ), signature="sa(iiay)ss")
+
+    def _properties(self):
+        return dbus.Dictionary({
+            "Category": dbus.String("ApplicationStatus"),
+            "Id": dbus.String("keyclean"),
+            "Title": dbus.String("Keyboard Cleaning"),
+            "Status": dbus.String("Active"),
+            "WindowId": dbus.Int32(0),
+            "IconName": dbus.String(self._icon),
+            "IconPixmap": dbus.Array([], signature="(iiay)"),
+            "OverlayIconName": dbus.String(""),
+            "OverlayIconPixmap": dbus.Array([], signature="(iiay)"),
+            "AttentionIconName": dbus.String(""),
+            "AttentionIconPixmap": dbus.Array([], signature="(iiay)"),
+            "AttentionMovieName": dbus.String(""),
+            "ToolTip": self._tooltip,
+            "ItemIsMenu": dbus.Boolean(False),
+            "Menu": dbus.ObjectPath(NO_MENU),
+        }, signature="sv")
+
+    def _set_active(self, active):
+        if active == self.active:
+            return
+        self.active = active
+        changed = dbus.Dictionary({
+            "IconName": dbus.String(self._icon),
+            "ToolTip": self._tooltip,
+        }, signature="sv")
+        self.PropertiesChanged(SNI, changed, dbus.Array([], signature="s"))
+        self.NewIcon()
+        self.NewToolTip()
+
+    def _toggle(self):
+        state = ask("toggle")
+        if state is None:
+            r = cli("toggle")
+            if r is None or r.returncode != 0:
+                return
+            state = ask("status")
+        if state:
+            self._set_active(state == "on")
+
+    @dbus.service.method(SNI, in_signature="ii", out_signature="")
+    def Activate(self, x, y):
+        self._toggle()
+
+    @dbus.service.method(SNI, in_signature="ii", out_signature="")
+    def SecondaryActivate(self, x, y):
+        pass
+
+    @dbus.service.method(SNI, in_signature="ii", out_signature="")
+    def ContextMenu(self, x, y):
+        pass
+
+    @dbus.service.method(SNI, in_signature="ii", out_signature="")
+    def Scroll(self, delta, orientation):
+        pass
+
+    @dbus.service.signal(SNI, signature="")
+    def NewIcon(self):
+        pass
+
+    @dbus.service.signal(SNI, signature="")
+    def NewToolTip(self):
+        pass
+
+    @dbus.service.signal(SNI, signature="s")
+    def NewStatus(self, status):
+        pass
+
+    @dbus.service.signal("org.freedesktop.DBus.Properties",
+                         signature="sa{sv}as")
+    def PropertiesChanged(self, interface, changed, invalidated):
+        pass
+
+    @dbus.service.method("org.freedesktop.DBus.Properties",
+                         in_signature="ss", out_signature="v")
+    def Get(self, interface, prop):
+        props = self._properties()
+        if prop not in props:
+            raise dbus.exceptions.DBusException(
+                "org.freedesktop.DBus.Error.InvalidArgs",
+                "Unknown property %s" % prop)
+        return props[prop]
+
+    @dbus.service.method("org.freedesktop.DBus.Properties",
+                         in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        return self._properties()
+
+    @dbus.service.method("org.freedesktop.DBus.Properties",
+                         in_signature="ssv", out_signature="")
+    def Set(self, interface, prop, value):
+        pass
+
+
+def main():
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SessionBus()
+    Tray(bus)
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

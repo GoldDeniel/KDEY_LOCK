@@ -1,0 +1,7 @@
+{
+    "uuid": "keyclean@local",
+    "name": "Keyboard Cleaning",
+    "description": "Temporarily ignores physical keyboard input so you can wipe the keyboard with the machine on. Click again to restore it.",
+    "shell-version": ["45", "46", "47", "48", "49"],
+    "version": 1
+}
